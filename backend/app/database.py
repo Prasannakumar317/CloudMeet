@@ -131,10 +131,19 @@ class DatabaseManager:
 
         try:
             logger.info("[Database] Connecting to MongoDB Atlas cluster0...")
+            client_kwargs = {
+                "serverSelectionTimeoutMS": 5000,
+                "connectTimeoutMS": 5000,
+            }
+            try:
+                import certifi
+                client_kwargs["tlsCAFile"] = certifi.where()
+            except Exception:
+                pass
+
             self.client = AsyncMongoClient(
                 settings.MONGODB_URI,
-                serverSelectionTimeoutMS=5000,
-                connectTimeoutMS=5000,
+                **client_kwargs
             )
 
             # Ping to verify connection
@@ -142,6 +151,7 @@ class DatabaseManager:
 
             # Select database from configuration
             self.database = self.client[settings.MONGODB_DATABASE]
+            self._is_in_memory = False
             logger.info(
                 f"[Database] Successfully connected to MongoDB Atlas (database: '{settings.MONGODB_DATABASE}')."
             )
@@ -173,14 +183,20 @@ class DatabaseManager:
         except (ConnectionFailure, ServerSelectionTimeoutError) as err:
             logger.error(
                 f"[Database] Failed to connect to MongoDB Atlas cluster0: {err}.\n"
-                "Please check your MONGODB_URI, network access rules, and Atlas IP access list in cloud.mongodb.com."
+                "Please check your MONGODB_URI and ensure 0.0.0.0/0 is added in MongoDB Atlas -> Network Access.\n"
+                "Falling back to local in-memory store so the service remains operational."
             )
             self.client = None
-            self.database = None
+            self.database = MockMongoDatabase()
+            self._is_in_memory = True
         except Exception as err:
-            logger.error(f"[Database] Unexpected MongoDB initialization error: {err}")
+            logger.error(
+                f"[Database] Unexpected MongoDB initialization error: {err}.\n"
+                "Falling back to local in-memory store."
+            )
             self.client = None
-            self.database = None
+            self.database = MockMongoDatabase()
+            self._is_in_memory = True
 
     async def disconnect(self) -> None:
         """Close MongoDB async connection cleanly."""
