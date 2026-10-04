@@ -1,4 +1,5 @@
 import logging
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from pymongo import AsyncMongoClient
@@ -7,6 +8,34 @@ from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 from app.config import settings
 
 logger = logging.getLogger("cloudmeet.database")
+
+
+def sanitize_mongodb_uri(uri: str) -> str:
+    """
+    Ensure username and password in MongoDB connection URI are URL-encoded
+    according to RFC 3986 (using urllib.parse.quote_plus) to prevent errors with special characters.
+    """
+    if not uri or "://" not in uri:
+        return uri
+    try:
+        scheme, rest = uri.split("://", 1)
+        if "@" not in rest:
+            return uri
+        last_at_idx = rest.rfind("@")
+        userinfo = rest[:last_at_idx]
+        hosts_and_query = rest[last_at_idx + 1:]
+        if ":" in userinfo:
+            username, password = userinfo.split(":", 1)
+            # Unquote first to avoid double encoding, then quote_plus per RFC 3986
+            username = urllib.parse.quote_plus(urllib.parse.unquote_plus(username))
+            password = urllib.parse.quote_plus(urllib.parse.unquote_plus(password))
+            return f"{scheme}://{username}:{password}@{hosts_and_query}"
+        else:
+            username = urllib.parse.quote_plus(urllib.parse.unquote_plus(userinfo))
+            return f"{scheme}://{username}@{hosts_and_query}"
+    except Exception as err:
+        logger.warning(f"[Database] Could not auto-sanitize MongoDB URI: {err}")
+        return uri
 
 
 class AsyncMockCursor:
@@ -141,8 +170,9 @@ class DatabaseManager:
             except Exception:
                 pass
 
+            sanitized_uri = sanitize_mongodb_uri(settings.MONGODB_URI)
             self.client = AsyncMongoClient(
-                settings.MONGODB_URI,
+                sanitized_uri,
                 **client_kwargs
             )
 
