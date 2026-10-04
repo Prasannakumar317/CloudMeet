@@ -22,16 +22,38 @@ export default function VideoTile({
     const videoEl = videoRef.current;
     if (!videoEl) return;
 
-    if (stream && !isVideoOff) {
-      videoEl.srcObject = stream;
-      videoEl.play().catch((err) => {
-        // Browsers may require user interaction for remote audio/video autoplay
-        console.debug('[VideoTile] Video play hindered:', err);
-      });
+    if (stream) {
+      if (videoEl.srcObject !== stream) {
+        videoEl.srcObject = stream;
+      }
+      const playPromise = videoEl.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          console.debug('[VideoTile] Video play hindered by autoplay policy:', err);
+        });
+      }
+
+      // Re-trigger playback if new tracks arrive dynamically
+      const handleTrackChange = () => {
+        if (videoEl && stream) {
+          if (videoEl.srcObject !== stream) {
+            videoEl.srcObject = stream;
+          }
+          videoEl.play().catch(() => {});
+        }
+      };
+
+      stream.addEventListener('addtrack', handleTrackChange);
+      stream.addEventListener('removetrack', handleTrackChange);
+
+      return () => {
+        stream.removeEventListener('addtrack', handleTrackChange);
+        stream.removeEventListener('removetrack', handleTrackChange);
+      };
     } else {
       videoEl.srcObject = null;
     }
-  }, [stream, isVideoOff]);
+  }, [stream]);
 
   // Extract initials from name
   const initials = name
@@ -44,25 +66,35 @@ export default function VideoTile({
         .toUpperCase()
     : 'U';
 
-  const hasLiveVideo = Boolean(stream && !isVideoOff);
+  // Live video is active if stream exists and either camera is on or peer is screen sharing
+  const hasLiveVideo = Boolean(stream && (!isVideoOff || isScreenSharing));
+
+  // Handle tap to unblock audio on mobile if autoplay was restricted
+  const handleTileClick = () => {
+    if (videoRef.current && videoRef.current.paused) {
+      videoRef.current.play().catch(() => {});
+    }
+  };
 
   return (
     <div
+      onClick={handleTileClick}
       className={`group relative rounded-2xl overflow-hidden bg-slate-900 border transition-all duration-300 flex items-center justify-center select-none shadow-md ${
         isSpeaking
           ? 'ring-2 ring-emerald-400 border-emerald-400 shadow-emerald-500/20'
           : 'border-slate-800/80 hover:border-slate-700'
       } ${className}`}
     >
-      {/* 1. REAL WEBRTC VIDEO STREAM */}
+      {/* 1. REAL WEBRTC VIDEO/AUDIO STREAM (Never display:none so audio decoder keeps running) */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
-        muted={isSelf} // Crucial: Always mute local stream to prevent acoustic feedback loop
-        className={`w-full h-full transition-opacity duration-300 ${
-          isScreenSharing ? 'object-contain bg-slate-950' : 'object-cover'
-        } ${hasLiveVideo ? 'opacity-100 block' : 'opacity-0 hidden'} ${
+        webkit-playsinline="true"
+        muted={isSelf} // Always mute local stream to prevent acoustic feedback loop
+        className={`transition-opacity duration-300 ${
+          isScreenSharing ? 'object-contain bg-slate-950 w-full h-full' : 'object-cover w-full h-full'
+        } ${hasLiveVideo ? 'opacity-100 block' : 'opacity-0 invisible absolute w-1 h-1 pointer-events-none'} ${
           isSelf && !isScreenSharing ? 'transform -scale-x-100' : ''
         }`}
       />

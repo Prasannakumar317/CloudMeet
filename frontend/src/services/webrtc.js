@@ -36,18 +36,41 @@ export function getWebSocketBaseUrl() {
 }
 
 export function getIceServers() {
-  const stunUrl = import.meta.env.VITE_STUN_SERVER || 'stun:stun.l.google.com:19302';
-  const iceServers = [{ urls: stunUrl }];
+  const iceServers = [
+    { urls: import.meta.env.VITE_STUN_SERVER || 'stun:stun.l.google.com:19302' },
+  ];
 
+  const meteredStun = import.meta.env.VITE_STUN_SERVER_METERED || 'stun:stun.relay.metered.ca:80';
+  if (meteredStun) {
+    iceServers.push({ urls: meteredStun });
+  }
+
+  const turnUsername = import.meta.env.VITE_TURN_USERNAME || '92a9139324ab92c6574ed8f6';
+  const turnCredential = import.meta.env.VITE_TURN_CREDENTIAL || 'iZVuwrf5X8cTC+GA';
+
+  // Generic TURN server if provided
   const turnServer = import.meta.env.VITE_TURN_SERVER;
-  const turnUsername = import.meta.env.VITE_TURN_USERNAME;
-  const turnCredential = import.meta.env.VITE_TURN_CREDENTIAL;
-
   if (turnServer) {
     const turnConfig = { urls: turnServer };
     if (turnUsername) turnConfig.username = turnUsername;
     if (turnCredential) turnConfig.credential = turnCredential;
     iceServers.push(turnConfig);
+  }
+
+  // Metered global TURN relay endpoints (UDP, TCP, TLS port 443, TURNS)
+  const turnEndpoints = [
+    import.meta.env.VITE_TURN_SERVER_UDP || 'turn:global.relay.metered.ca:80',
+    import.meta.env.VITE_TURN_SERVER_TCP || 'turn:global.relay.metered.ca:80?transport=tcp',
+    import.meta.env.VITE_TURN_SERVER_TLS || 'turn:global.relay.metered.ca:443',
+    import.meta.env.VITE_TURN_SERVER_TLS_TCP || 'turns:global.relay.metered.ca:443?transport=tcp',
+  ].filter(Boolean);
+
+  if (turnEndpoints.length > 0 && turnUsername && turnCredential) {
+    iceServers.push({
+      urls: turnEndpoints,
+      username: turnUsername,
+      credential: turnCredential,
+    });
   }
 
   return iceServers;

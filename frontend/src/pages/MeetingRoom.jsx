@@ -459,10 +459,33 @@ export default function MeetingRoom() {
     if (!videoEl) return;
 
     if (activeScreenShare?.stream) {
-      videoEl.srcObject = activeScreenShare.stream;
-      videoEl.play().catch((err) => {
-        console.debug('[MeetingRoom] Screen share video autoplay:', err);
-      });
+      if (videoEl.srcObject !== activeScreenShare.stream) {
+        videoEl.srcObject = activeScreenShare.stream;
+      }
+
+      const playPromise = videoEl.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          console.debug('[MeetingRoom] Screen share autoplay waiting for interaction:', err);
+        });
+      }
+
+      const handleTrackChange = () => {
+        if (videoEl && activeScreenShare?.stream) {
+          if (videoEl.srcObject !== activeScreenShare.stream) {
+            videoEl.srcObject = activeScreenShare.stream;
+          }
+          videoEl.play().catch(() => {});
+        }
+      };
+
+      activeScreenShare.stream.addEventListener('addtrack', handleTrackChange);
+      activeScreenShare.stream.addEventListener('removetrack', handleTrackChange);
+
+      return () => {
+        activeScreenShare.stream.removeEventListener('addtrack', handleTrackChange);
+        activeScreenShare.stream.removeEventListener('removetrack', handleTrackChange);
+      };
     } else {
       videoEl.srcObject = null;
     }
@@ -875,12 +898,20 @@ export default function MeetingRoom() {
                 </div>
 
                 {/* Featured Video Element */}
-                <div className="flex-1 bg-black flex items-center justify-center min-h-0">
+                <div
+                  className="flex-1 bg-black flex items-center justify-center min-h-0 cursor-pointer"
+                  onClick={() => {
+                    if (screenShareVideoRef.current && screenShareVideoRef.current.paused) {
+                      screenShareVideoRef.current.play().catch(() => {});
+                    }
+                  }}
+                >
                   <video
                     ref={screenShareVideoRef}
                     autoPlay
                     playsInline
-                    muted={activeScreenShare.isSelf}
+                    webkit-playsinline="true"
+                    muted={true}
                     className="w-full h-full object-contain"
                   />
                 </div>
