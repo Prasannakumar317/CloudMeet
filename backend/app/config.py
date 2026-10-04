@@ -31,8 +31,17 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> List[str]:
-        raw = self.CORS_ALLOWED_ORIGINS or self.CORS_ORIGINS or "http://localhost:5173"
-        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+        raw = self.CORS_ALLOWED_ORIGINS or self.CORS_ORIGINS or ""
+        configured = [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+        defaults = [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "https://cloudmeet1.vercel.app",
+        ]
+        for d in defaults:
+            if d not in configured:
+                configured.append(d)
+        return configured
 
     @property
     def is_mongodb_configured(self) -> bool:
