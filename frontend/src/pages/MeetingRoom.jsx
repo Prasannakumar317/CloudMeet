@@ -190,7 +190,12 @@ export default function MeetingRoom() {
     try {
       const res = await getParticipants(cleanRoomId);
       if (isMountedRef.current && res?.participants) {
-        setParticipants(res.participants);
+        setParticipants((prev) => {
+          const prevKey = prev.map((p) => `${p.id}:${p.is_active}`).sort().join(',');
+          const newKey = res.participants.map((p) => `${p.id}:${p.is_active}`).sort().join(',');
+          if (prevKey === newKey) return prev;
+          return res.participants;
+        });
       }
     } catch (err) {
       if (err.status === 404 || err.status === 400) {
@@ -454,13 +459,14 @@ export default function MeetingRoom() {
   }, [isScreenSharing, screenStream, user?.id, currentUserName, remotePeers]);
 
   // Attach active screen share MediaStream to featured video element
+  const activeScreenShareStream = activeScreenShare?.stream || null;
   useEffect(() => {
     const videoEl = screenShareVideoRef.current;
     if (!videoEl) return;
 
-    if (activeScreenShare?.stream) {
-      if (videoEl.srcObject !== activeScreenShare.stream) {
-        videoEl.srcObject = activeScreenShare.stream;
+    if (activeScreenShareStream) {
+      if (videoEl.srcObject !== activeScreenShareStream) {
+        videoEl.srcObject = activeScreenShareStream;
       }
 
       const playPromise = videoEl.play();
@@ -471,25 +477,27 @@ export default function MeetingRoom() {
       }
 
       const handleTrackChange = () => {
-        if (videoEl && activeScreenShare?.stream) {
-          if (videoEl.srcObject !== activeScreenShare.stream) {
-            videoEl.srcObject = activeScreenShare.stream;
+        if (videoEl && activeScreenShareStream) {
+          if (videoEl.srcObject !== activeScreenShareStream) {
+            videoEl.srcObject = activeScreenShareStream;
           }
           videoEl.play().catch(() => {});
         }
       };
 
-      activeScreenShare.stream.addEventListener('addtrack', handleTrackChange);
-      activeScreenShare.stream.addEventListener('removetrack', handleTrackChange);
+      activeScreenShareStream.addEventListener('addtrack', handleTrackChange);
+      activeScreenShareStream.addEventListener('removetrack', handleTrackChange);
 
       return () => {
-        activeScreenShare.stream.removeEventListener('addtrack', handleTrackChange);
-        activeScreenShare.stream.removeEventListener('removetrack', handleTrackChange);
+        activeScreenShareStream.removeEventListener('addtrack', handleTrackChange);
+        activeScreenShareStream.removeEventListener('removetrack', handleTrackChange);
       };
     } else {
-      videoEl.srcObject = null;
+      if (videoEl.srcObject) {
+        videoEl.srcObject = null;
+      }
     }
-  }, [activeScreenShare]);
+  }, [activeScreenShareStream]);
 
   // Dynamic connection badge configuration
   const connectionBadge = useMemo(() => {

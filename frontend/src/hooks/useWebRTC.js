@@ -44,6 +44,19 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
   const reconnectTimerRef = useRef(null);
   const pingTimerRef = useRef(null);
 
+  // Stable callback & props refs to prevent re-triggering connection teardowns
+  const onRoomEndedRef = useRef(onRoomEnded);
+  const onNotificationRef = useRef(onNotification);
+  const onChatMessageRef = useRef(onChatMessage);
+  const userRef = useRef(user);
+
+  useEffect(() => {
+    onRoomEndedRef.current = onRoomEnded;
+    onNotificationRef.current = onNotification;
+    onChatMessageRef.current = onChatMessage;
+    userRef.current = user;
+  });
+
   // Helper to send a signaling message over WebSocket
   const sendSignal = useCallback((message) => {
     const ws = wsRef.current;
@@ -62,10 +75,8 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
     const peerList = [];
     remotePeersInfoRef.current.forEach((info, peerId) => {
       const rawStream = remoteStreamsRef.current.get(peerId) || null;
-      // Pass a fresh MediaStream wrapper so VideoTile and React re-render when tracks arrive
-      const stream = rawStream && rawStream.getTracks().length > 0
-        ? new MediaStream(rawStream.getTracks())
-        : null;
+      // Keep persistent rawStream so <video> elements are not constantly re-initialized
+      const stream = rawStream && rawStream.getTracks().length > 0 ? rawStream : null;
 
       peerList.push({
         id: peerId,
@@ -213,7 +224,38 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
       syncRemotePeersState();
     };
 
-    // Connection state change handler
+    // Proper ICE restart handler with SDP offer renegotiation
+    const triggerIceRestart = async () => {
+      try {
+        console.info(`[useWebRTC] Performing ICE restart for peer ${targetUserId}...`);
+        const offer = await pc.createOffer({ iceRestart: true });
+        await pc.setLocalDescription(offer);
+        sendSignal({
+          type: 'offer',
+          target: targetUserId,
+          description: offer,
+        });
+      } catch (err) {
+        console.warn(`[useWebRTC] ICE restart failed for ${targetUserId}:`, err);
+      }
+    };
+
+    // ICE Connection state change handler
+    pc.oniceconnectionstatechange = () => {
+      const iceState = pc.iceConnectionState;
+      const info = remotePeersInfoRef.current.get(targetUserId);
+      if (info) {
+        info.connectionState = iceState;
+        syncRemotePeersState();
+      }
+
+      if (iceState === 'failed') {
+        console.warn(`[useWebRTC] ICE failed for ${targetUserId}, performing ICE restart...`);
+        triggerIceRestart();
+      }
+    };
+
+    // Overall Connection state change handler
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
       const info = remotePeersInfoRef.current.get(targetUserId);
@@ -223,8 +265,8 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
       }
 
       if (state === 'failed') {
-        console.warn(`[useWebRTC] PeerConnection failed for ${targetUserId}, attempting ICE restart...`);
-        pc.restartIce?.();
+        console.warn(`[useWebRTC] PeerConnection failed for ${targetUserId}, performing ICE restart...`);
+        triggerIceRestart();
       }
     };
 
@@ -389,7 +431,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
           reconnectAttemptsRef.current = 0;
           setConnectionStatus('connected');
 
-          // Cloud Keepalive ping to prevent Render/gateway idle timeout (every 25 seconds)
+          // Cloud Keepalive ping to prevent Render/gateway idle timeout (every 10 seconds)
           if (pingTimerRef.current) clearInterval(pingTimerRef.current);
           pingTimerRef.current = setInterval(() => {
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -397,7 +439,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
                 wsRef.current.send(JSON.stringify({ type: 'ping' }));
               } catch {}
             }
-          }, 25000);
+          }, 10000);
         }
 
         // Liveness pong response
@@ -421,7 +463,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
             });
             syncRemotePeersState();
 
-            onNotification?.({
+            onNotificationRef.current?.({
               id: Date.now(),
               text: `${peer.full_name || 'Participant'} joined the room`,
               type: 'join',
@@ -514,13 +556,13 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
               syncRemotePeersState();
 
               if (!prevScreen && scr) {
-                onNotification?.({
+                onNotificationRef.current?.({
                   id: Date.now(),
                   text: `${info.name} started screen sharing.`,
                   type: 'screenshare',
                 });
               } else if (prevScreen && !scr) {
-                onNotification?.({
+                onNotificationRef.current?.({
                   id: Date.now(),
                   text: `${info.name} stopped screen sharing.`,
                   type: 'screenshare',
@@ -532,7 +574,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
 
         // 7. In-Meeting Real-Time Chat Message (Part 6)
         else if (msgType === 'chat_message') {
-          const isSelf = message.user?.user_id === user?.id;
+          const isSelf = message.user?.user_id === userRef.current?.id;
           const newMsg = {
             id: message.message_id || Date.now(),
             message_id: message.message_id,
@@ -546,7 +588,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
             isSelf,
           };
           setChatMessages((prev) => [...prev, newMsg]);
-          onChatMessage?.(newMsg);
+          onChatMessageRef.current?.(newMsg);
         }
 
         // 8. Remote participant disconnected
@@ -568,7 +610,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
             remotePeersInfoRef.current.delete(leftUserId);
             syncRemotePeersState();
 
-            onNotification?.({
+            onNotificationRef.current?.({
               id: Date.now(),
               text: `${peerName} left the room`,
               type: 'leave',
@@ -581,13 +623,13 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
           const endMsg = message.message || 'The host ended this meeting.';
           setIsRoomEnded(true);
           setRoomEndedMessage(endMsg);
-          onRoomEnded?.(endMsg);
+          onRoomEndedRef.current?.(endMsg);
         }
 
         // 10. Error from server
         else if (msgType === 'error') {
           console.warn('[useWebRTC] Server error message:', message.message);
-          onNotification?.({
+          onNotificationRef.current?.({
             id: Date.now(),
             text: message.message,
             type: 'error',
@@ -615,7 +657,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
       if (event.code === 4400 && event.reason?.includes('ended')) {
         setIsRoomEnded(true);
         setRoomEndedMessage('This meeting has already ended.');
-        onRoomEnded?.('This meeting has already ended.');
+        onRoomEndedRef.current?.('This meeting has already ended.');
         return;
       }
 
@@ -634,14 +676,16 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
         setConnectionStatus('disconnected');
       }
     };
-  }, [cleanRoomId, user, createPeerConnection, flushQueuedCandidates, sendSignal, syncRemotePeersState, onRoomEnded, onNotification, onChatMessage]);
+  }, [cleanRoomId, createPeerConnection, flushQueuedCandidates, sendSignal, syncRemotePeersState]);
 
-  // Main lifecycle: Initialize Media then WebSocket
+  const userId = user?.id;
+
+  // Main lifecycle: Initialize Media then WebSocket (depends only on room and userId)
   useEffect(() => {
     isMountedRef.current = true;
     isCleaningUpRef.current = false;
 
-    if (!cleanRoomId || !user) return;
+    if (!cleanRoomId || !userId) return;
 
     let isEffectValid = true;
 
@@ -710,7 +754,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
       pendingCandidatesRef.current.clear();
       remotePeersInfoRef.current.clear();
     };
-  }, [cleanRoomId, user, acquireMedia, connectWebSocket]);
+  }, [cleanRoomId, userId, acquireMedia, connectWebSocket]);
 
   // Toggle Microphone (audioTrack.enabled)
   const toggleMicrophone = useCallback(() => {
@@ -795,14 +839,14 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
         }
       } catch (err) {
         console.warn('[useWebRTC] Failed to acquire camera on toggle:', err);
-        onNotification?.({
+        onNotificationRef.current?.({
           id: Date.now(),
           text: 'Unable to access camera on this device.',
           type: 'warning',
         });
       }
     }
-  }, [acquireMedia, isScreenSharing, microphoneEnabled, onNotification, replaceVideoTrackAcrossPeers, sendSignal]);
+  }, [acquireMedia, isScreenSharing, microphoneEnabled, replaceVideoTrackAcrossPeers, sendSignal]);
 
   // Stop Screen Share
   const stopScreenShare = useCallback(async () => {
@@ -843,12 +887,12 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
       },
     });
 
-    onNotification?.({
+    onNotificationRef.current?.({
       id: Date.now(),
       text: 'You stopped sharing your screen.',
       type: 'screenshare',
     });
-  }, [microphoneEnabled, onNotification, replaceVideoTrackAcrossPeers, sendSignal]);
+  }, [microphoneEnabled, replaceVideoTrackAcrossPeers, sendSignal]);
 
   // Start Screen Share
   const startScreenShare = useCallback(async () => {
@@ -859,7 +903,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
     const isIPhone = typeof navigator !== 'undefined' && /iPhone|iPod/i.test(navigator.userAgent || '');
 
     if (isIPhone) {
-      onNotification?.({
+      onNotificationRef.current?.({
         id: Date.now(),
         text: 'Screen sharing from iPhones is restricted by iOS. You can still view other participants’ shared screens in HD.',
         type: 'warning',
@@ -868,7 +912,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
     }
 
     if (typeof navigator === 'undefined' || !navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
-      onNotification?.({
+      onNotificationRef.current?.({
         id: Date.now(),
         text: 'Screen sharing is not supported by your mobile browser. You can still view shared screens.',
         type: 'warning',
@@ -916,7 +960,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
         },
       });
 
-      onNotification?.({
+      onNotificationRef.current?.({
         id: Date.now(),
         text: 'You started sharing your screen.',
         type: 'screenshare',
@@ -926,20 +970,20 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
     } catch (err) {
       if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
         console.info('[useWebRTC] Screen sharing cancelled by user');
-        onNotification?.({
+        onNotificationRef.current?.({
           id: Date.now(),
           text: 'Screen sharing was cancelled.',
           type: 'info',
         });
       } else if (err.name === 'NotSupportedError' || err.message?.includes('not supported')) {
-        onNotification?.({
+        onNotificationRef.current?.({
           id: Date.now(),
           text: 'Screen sharing is not supported on this device.',
           type: 'warning',
         });
       } else {
         console.error('[useWebRTC] Error starting screen share:', err);
-        onNotification?.({
+        onNotificationRef.current?.({
           id: Date.now(),
           text: `Screen sharing couldn't start: ${err.message || 'Permission denied'}`,
           type: 'error',
@@ -947,7 +991,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
       }
       return false;
     }
-  }, [cameraEnabled, microphoneEnabled, onNotification, replaceVideoTrackAcrossPeers, sendSignal, stopScreenShare]);
+  }, [cameraEnabled, microphoneEnabled, replaceVideoTrackAcrossPeers, sendSignal, stopScreenShare]);
 
   // Toggle Screen Share
   const toggleScreenShare = useCallback(() => {
@@ -964,7 +1008,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
     const trimmed = text.trim();
     if (!trimmed) return false;
     if (trimmed.length > 2000) {
-      onNotification?.({
+      onNotificationRef.current?.({
         id: Date.now(),
         text: 'Message is too long (maximum 2000 characters).',
         type: 'error',
@@ -977,7 +1021,7 @@ export function useWebRTC({ roomId, user, onRoomEnded, onNotification, onChatMes
       message: trimmed,
     });
     return true;
-  }, [onNotification, sendSignal]);
+  }, [sendSignal]);
 
   // Clean Leave
   const leave = useCallback(() => {
