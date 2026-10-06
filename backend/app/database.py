@@ -158,75 +158,90 @@ class DatabaseManager:
             self._is_in_memory = True
             return
 
+        client_kwargs = {
+            "serverSelectionTimeoutMS": 15000,
+            "connectTimeoutMS": 15000,
+            "maxIdleTimeMS": 120000,
+        }
         try:
-            logger.info("[Database] Connecting to MongoDB Atlas cluster0...")
-            client_kwargs = {
-                "serverSelectionTimeoutMS": 5000,
-                "connectTimeoutMS": 5000,
-            }
+            import certifi
+            client_kwargs["tlsCAFile"] = certifi.where()
+        except Exception:
+            pass
+
+        sanitized_uri = sanitize_mongodb_uri(settings.MONGODB_URI)
+
+        # Connect with retry to withstand cloud container cold-boot DNS/TLS latency
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
             try:
-                import certifi
-                client_kwargs["tlsCAFile"] = certifi.where()
-            except Exception:
-                pass
+                logger.info(f"[Database] Connecting to MongoDB Atlas cluster0 (attempt {attempt}/{max_attempts})...")
+                self.client = AsyncMongoClient(
+                    sanitized_uri,
+                    **client_kwargs
+                )
 
-            sanitized_uri = sanitize_mongodb_uri(settings.MONGODB_URI)
-            self.client = AsyncMongoClient(
-                sanitized_uri,
-                **client_kwargs
-            )
+                # Ping to verify connection
+                await self.client.admin.command("ping")
 
-            # Ping to verify connection
-            await self.client.admin.command("ping")
+                # Select database from configuration
+                self.database = self.client[settings.MONGODB_DATABASE]
+                self._is_in_memory = False
+                logger.info(
+                    f"[Database] Successfully connected to MongoDB Atlas (database: '{settings.MONGODB_DATABASE}')."
+                )
 
-            # Select database from configuration
-            self.database = self.client[settings.MONGODB_DATABASE]
-            self._is_in_memory = False
-            logger.info(
-                f"[Database] Successfully connected to MongoDB Atlas (database: '{settings.MONGODB_DATABASE}')."
-            )
+                # Ensure unique index on users.supabase_user_id
+                await self.database.users.create_index(
+                    "supabase_user_id",
+                    unique=True,
+                )
+                logger.info("[Database] Verified unique index on 'users.supabase_user_id'.")
 
-            # Ensure unique index on users.supabase_user_id
-            await self.database.users.create_index(
-                "supabase_user_id",
-                unique=True,
-            )
-            logger.info("[Database] Verified unique index on 'users.supabase_user_id'.")
+                # Ensure unique index on meetings.room_id
+                await self.database.meetings.create_index(
+                    "room_id",
+                    unique=True,
+                )
+                # Ensure index on idempotency_key
+                await self.database.meetings.create_index(
+                    "idempotency_key",
+                    sparse=True,
+                )
+                logger.info("[Database] Verified unique index on 'meetings.room_id' and sparse index on 'idempotency_key'.")
 
-            # Ensure unique index on meetings.room_id
-            await self.database.meetings.create_index(
-                "room_id",
-                unique=True,
-            )
-            logger.info("[Database] Verified unique index on 'meetings.room_id'.")
+                # Ensure indexes on meeting_participants
+                await self.database.meeting_participants.create_index("room_id")
+                await self.database.meeting_participants.create_index("supabase_user_id")
+                await self.database.meeting_participants.create_index(
+                    [("room_id", 1), ("supabase_user_id", 1)],
+                    unique=True,
+                    partialFilterExpression={"is_active": True},
+                )
+                logger.info("[Database] Verified indexes on 'meeting_participants'.")
+                break
 
-            # Ensure indexes on meeting_participants
-            await self.database.meeting_participants.create_index("room_id")
-            await self.database.meeting_participants.create_index("supabase_user_id")
-            await self.database.meeting_participants.create_index(
-                [("room_id", 1), ("supabase_user_id", 1)],
-                unique=True,
-                partialFilterExpression={"is_active": True},
-            )
-            logger.info("[Database] Verified indexes on 'meeting_participants'.")
-
-        except (ConnectionFailure, ServerSelectionTimeoutError) as err:
-            logger.error(
-                f"[Database] Failed to connect to MongoDB Atlas cluster0: {err}.\n"
-                "Please check your MONGODB_URI and ensure 0.0.0.0/0 is added in MongoDB Atlas -> Network Access.\n"
-                "Falling back to local in-memory store so the service remains operational."
-            )
-            self.client = None
-            self.database = MockMongoDatabase()
-            self._is_in_memory = True
-        except Exception as err:
-            logger.error(
-                f"[Database] Unexpected MongoDB initialization error: {err}.\n"
-                "Falling back to local in-memory store."
-            )
-            self.client = None
-            self.database = MockMongoDatabase()
-            self._is_in_memory = True
+            except (ConnectionFailure, ServerSelectionTimeoutError) as err:
+                logger.warning(f"[Database] MongoDB Atlas connection attempt {attempt} failed: {err}")
+                if attempt < max_attempts:
+                    import asyncio
+                    await asyncio.sleep(2)
+                else:
+                    logger.error(
+                        f"[Database] Failed to connect to MongoDB Atlas cluster0 after {max_attempts} attempts: {err}.\n"
+                        "Please check your MONGODB_URI and ensure 0.0.0.0/0 is added in MongoDB Atlas -> Network Access."
+                    )
+                    self.client = None
+                    self.database = None
+                    self._is_in_memory = False
+            except Exception as err:
+                logger.error(
+                    f"[Database] Unexpected MongoDB initialization error: {err}."
+                )
+                self.client = None
+                self.database = None
+                self._is_in_memory = False
+                break
 
     async def disconnect(self) -> None:
         """Close MongoDB async connection cleanly."""

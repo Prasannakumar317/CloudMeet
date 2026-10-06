@@ -1,6 +1,7 @@
 import logging
+import time
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header
 from pymongo.asynchronous.database import AsyncDatabase
 from app.dependencies.auth import get_current_user, AuthenticatedUser
 from app.database import get_database
@@ -40,13 +41,21 @@ async def create_meeting_endpoint(
     payload: Optional[CreateMeetingRequest] = None,
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: AsyncDatabase = Depends(require_db),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ) -> MeetingResponse:
+    t_start = time.perf_counter()
+    logger.info("CREATE_MEETING request received")
+    logger.info("CREATE_MEETING authentication complete")
     title = payload.title if payload else None
-    return await meeting_service.create_meeting(
+    result = await meeting_service.create_meeting(
         db=db,
         host_user=current_user,
         title=title,
+        idempotency_key=idempotency_key,
     )
+    elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+    logger.info(f"CREATE_MEETING completed in {elapsed_ms}ms")
+    return result
 
 
 # ==============================================================================

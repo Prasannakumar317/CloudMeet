@@ -14,6 +14,7 @@ import { supabase } from '../lib/supabase';
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/+$/, '');
 const DEFAULT_TIMEOUT_MS = 15000;
+const CREATE_MEETING_TIMEOUT_MS = 60000; // 60s to accommodate cloud cold starts (typically 35-50s)
 
 /**
  * Retrieve the current Supabase session access token.
@@ -37,6 +38,7 @@ export async function request(endpoint, options = {}) {
   const timeoutMs = options.timeout || DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const startTime = Date.now();
 
   const headers = {
     'Content-Type': 'application/json',
@@ -61,6 +63,7 @@ export async function request(endpoint, options = {}) {
   try {
     const response = await fetch(url, config);
     clearTimeout(timeoutId);
+    const durationMs = Date.now() - startTime;
 
     // If 401 Unauthorized and not already retrying, attempt one session refresh
     if (response.status === 401 && !_isRetry && supabase) {
@@ -113,8 +116,14 @@ export async function request(endpoint, options = {}) {
         case 500:
           friendlyMessage = 'An unexpected server error occurred. Please try again later.';
           break;
+        case 502:
+          friendlyMessage = 'CloudMeet service is warming up. Please try again in a few moments.';
+          break;
         case 503:
           friendlyMessage = 'CloudMeet service is temporarily unavailable. Please try again shortly.';
+          break;
+        case 504:
+          friendlyMessage = 'Gateway timed out waiting for CloudMeet service. Please try again shortly.';
           break;
         default:
           friendlyMessage = typeof data?.detail === 'string' ? data.detail : (response.statusText || friendlyMessage);
@@ -123,25 +132,34 @@ export async function request(endpoint, options = {}) {
       const error = new Error(friendlyMessage);
       error.status = response.status;
       error.data = data;
+      error.durationMs = durationMs;
+      error.receivedResponse = true;
       throw error;
     }
 
     return data;
   } catch (error) {
     clearTimeout(timeoutId);
+    const durationMs = Date.now() - startTime;
+    error.durationMs = durationMs;
+    error.receivedResponse = error.receivedResponse ?? false;
 
     // Timeout via AbortController
     if (error.name === 'AbortError') {
-      const timeoutError = new Error('The request took too long. Please try again.');
+      const timeoutError = new Error('The request took too long. The server may be warming up. Please try again.');
       timeoutError.status = 408;
+      timeoutError.durationMs = durationMs;
+      timeoutError.receivedResponse = false;
       timeoutError.originalError = error;
       throw timeoutError;
     }
 
     // Network disconnection / Server unreachable
     if (error.name === 'TypeError' && (error.message.includes('fetch') || error.message.includes('NetworkError') || error.message.includes('Failed to fetch'))) {
-      const netError = new Error('Unable to connect to CloudMeet server. Please check your internet connection.');
+      const netError = new Error('Unable to connect to CloudMeet server. Please check your connection and try again shortly.');
       netError.status = 0;
+      netError.durationMs = durationMs;
+      netError.receivedResponse = false;
       netError.originalError = error;
       throw netError;
     }
@@ -154,9 +172,15 @@ export async function request(endpoint, options = {}) {
 // Reusable Meeting API Functions
 // ==========================================
 
-export async function createMeeting(title = 'CloudMeet Meeting') {
+export async function createMeeting(title = 'CloudMeet Meeting', options = {}) {
+  const idempotencyKey = options.idempotencyKey || `req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
   return request('/api/meetings', {
     method: 'POST',
+    timeout: options.timeout || CREATE_MEETING_TIMEOUT_MS,
+    headers: {
+      'Idempotency-Key': idempotencyKey,
+      ...(options.headers || {}),
+    },
     body: JSON.stringify({ title: (title || '').trim() || 'CloudMeet Meeting' }),
   });
 }

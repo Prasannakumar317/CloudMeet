@@ -26,7 +26,7 @@ import Button from '../components/Button';
 import FeatureCard from '../components/FeatureCard';
 import RecentMeetings from '../components/RecentMeetings';
 import { useAuth } from '../context/AuthContext';
-import { createMeeting, joinMeeting } from '../services/api';
+import { createMeeting, joinMeeting, checkHealth } from '../services/api';
 
 
 export default function Home() {
@@ -41,7 +41,13 @@ export default function Home() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [meetingTitle, setMeetingTitle] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const [isWarmingUp, setIsWarmingUp] = useState(false);
   const [createError, setCreateError] = useState('');
+
+  // Proactively ping health endpoint on landing to wake sleeping backend if inactive
+  React.useEffect(() => {
+    checkHealth().catch(() => {});
+  }, []);
 
   // Handle Create Meeting button click
   const handleOpenCreateMeeting = () => {
@@ -51,6 +57,7 @@ export default function Home() {
     }
     setMeetingTitle('');
     setCreateError('');
+    setIsWarmingUp(false);
     setShowCreateModal(true);
   };
 
@@ -62,10 +69,17 @@ export default function Home() {
     }
 
     setIsCreating(true);
+    setIsWarmingUp(false);
     setCreateError('');
+
+    // If request takes longer than 4s, inform user that cloud instance is waking up
+    const warmUpTimer = setTimeout(() => {
+      setIsWarmingUp(true);
+    }, 4000);
 
     try {
       const response = await createMeeting(meetingTitle.trim() || 'CloudMeet Meeting');
+      clearTimeout(warmUpTimer);
       if (response?.room_id) {
         setShowCreateModal(false);
         navigate(`/meeting/${response.room_id}`);
@@ -73,10 +87,18 @@ export default function Home() {
         throw new Error('No room ID returned from server.');
       }
     } catch (err) {
-      console.error('[Home] Failed to create meeting:', err);
+      clearTimeout(warmUpTimer);
+      console.error('[Home] Failed to create meeting:', {
+        status: err.status,
+        duration: err.durationMs,
+        receivedResponse: err.receivedResponse,
+        message: err.message,
+      });
       setCreateError(err.message || 'Something went wrong while processing the meeting.');
     } finally {
+      clearTimeout(warmUpTimer);
       setIsCreating(false);
+      setIsWarmingUp(false);
     }
   };
 
@@ -595,6 +617,13 @@ export default function Home() {
                   Leave blank to use default "CloudMeet Meeting"
                 </p>
               </div>
+
+              {isCreating && isWarmingUp && (
+                <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-700 font-medium flex items-center gap-2 animate-in fade-in">
+                  <Loader2 className="w-4 h-4 animate-spin text-indigo-600 shrink-0" />
+                  <span>Connecting to cloud server (waking up instance, please wait)...</span>
+                </div>
+              )}
 
               {createError && (
                 <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium">

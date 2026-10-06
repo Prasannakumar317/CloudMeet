@@ -469,6 +469,28 @@ class TestMeetingRoomManagement(unittest.TestCase):
         self.assertEqual(res.headers.get("x-frame-options"), "DENY")
         self.assertEqual(res.headers.get("referrer-policy"), "strict-origin-when-cross-origin")
 
+    # 21. Idempotency Key prevents duplicate meetings on retries
+    def test_idempotent_create_meeting(self):
+        self.current_mock_user = self.host_user
+        headers = {"Idempotency-Key": "test-req-uuid-123"}
+
+        # First request creates meeting
+        res1 = self.client.post("/api/meetings", json={"title": "Idempotent Sync"}, headers=headers)
+        self.assertEqual(res1.status_code, 201)
+        data1 = res1.json()
+        room_id = data1["room_id"]
+
+        # Second request with same idempotency key returns exact same meeting
+        res2 = self.client.post("/api/meetings", json={"title": "Idempotent Sync"}, headers=headers)
+        self.assertEqual(res2.status_code, 201)
+        data2 = res2.json()
+        self.assertEqual(data2["room_id"], room_id)
+        self.assertEqual(data2["title"], data1["title"])
+
+        # Count total meetings in mock database for this user
+        meetings = [m for m in self.mock_db.meetings.docs if m.get("host_supabase_user_id") == self.host_user.id and m.get("idempotency_key") == "test-req-uuid-123"]
+        self.assertEqual(len(meetings), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

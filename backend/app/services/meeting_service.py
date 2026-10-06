@@ -67,14 +67,42 @@ async def create_meeting(
     db: AsyncDatabase,
     host_user: AuthenticatedUser,
     title: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> MeetingResponse:
     """
     Create a new meeting with a unique room ID and register host as an active participant.
     Derives host identity strictly from verified Supabase AuthenticatedUser.
+    Supports safe idempotency keys to prevent duplicate rooms on retries.
     """
+    logger.info("CREATE_MEETING database operation started")
     clean_title = (title or "").strip()
     if not clean_title:
         clean_title = "CloudMeet Meeting"
+
+    # Idempotency check: if client sent an idempotency key, reuse already-created meeting if found
+    if idempotency_key and str(idempotency_key).strip():
+        clean_idempotency_key = str(idempotency_key).strip()
+        existing_meeting = await db.meetings.find_one({
+            "idempotency_key": clean_idempotency_key,
+            "host_supabase_user_id": host_user.id,
+            "status": STATUS_ACTIVE,
+        })
+        if existing_meeting:
+            logger.info(
+                f"[MeetingService] Idempotency match for key '{clean_idempotency_key}', returning room '{existing_meeting['room_id']}'"
+            )
+            logger.info("CREATE_MEETING database operation completed")
+            return MeetingResponse(
+                room_id=existing_meeting["room_id"],
+                title=existing_meeting.get("title", clean_title),
+                status=existing_meeting.get("status", STATUS_ACTIVE),
+                host_supabase_user_id=host_user.id,
+                role=ROLE_HOST,
+                created_at=existing_meeting.get("created_at"),
+                started_at=existing_meeting.get("started_at"),
+                ended_at=existing_meeting.get("ended_at"),
+                participant_count=1,
+            )
 
     now = datetime.now(timezone.utc)
     room_id: Optional[str] = None
@@ -96,6 +124,8 @@ async def create_meeting(
             "started_at": now,
             "ended_at": None,
         }
+        if idempotency_key and str(idempotency_key).strip():
+            meeting_doc["idempotency_key"] = str(idempotency_key).strip()
 
         try:
             await db.meetings.insert_one(meeting_doc)
@@ -146,6 +176,18 @@ async def create_meeting(
             },
             upsert=True,
         )
+    except Exception as part_err:
+        logger.error(f"[MeetingService] Failed to register host participant, rolling back meeting '{room_id}': {part_err}")
+        try:
+            await db.meetings.delete_one({"room_id": room_id})
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to initialize meeting host. Please try again.",
+        )
+
+    logger.info("CREATE_MEETING database operation completed")
 
     return MeetingResponse(
         room_id=room_id,
