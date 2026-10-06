@@ -15,7 +15,10 @@ def sanitize_mongodb_uri(uri: str) -> str:
     Ensure username and password in MongoDB connection URI are URL-encoded
     according to RFC 3986 (using urllib.parse.quote_plus) to prevent errors with special characters.
     """
-    if not uri or "://" not in uri:
+    if not uri:
+        return ""
+    uri = uri.strip().strip("'").strip('"')
+    if "://" not in uri:
         return uri
     try:
         scheme, rest = uri.split("://", 1)
@@ -167,7 +170,7 @@ class DatabaseManager:
 
         # Multi-strategy connection candidates:
         # 1. Sanitized URI with certifi CA bundle
-        # 2. Raw URI with system root CAs
+        # 2. Sanitized URI with system root CAs
         candidates = []
         ca_file = None
         try:
@@ -180,10 +183,8 @@ class DatabaseManager:
         if ca_file:
             candidates.append((sanitized_uri, {"tlsCAFile": ca_file}))
         candidates.append((sanitized_uri, {}))
-        if settings.MONGODB_URI != sanitized_uri:
-            candidates.append((settings.MONGODB_URI, {}))
 
-        last_err = None
+        attempt_errors = []
         for idx, (uri_to_try, extra_kwargs) in enumerate(candidates, 1):
             if not uri_to_try:
                 continue
@@ -232,13 +233,16 @@ class DatabaseManager:
                 return
 
             except (ConnectionFailure, ServerSelectionTimeoutError) as err:
-                last_err = f"{type(err).__name__}: {err}"
-                logger.warning(f"[Database] Method {idx} failed to connect to Atlas: {err}")
+                err_msg = f"method_{idx} ({type(err).__name__}: {err})"
+                attempt_errors.append(err_msg)
+                logger.warning(f"[Database] {err_msg}")
             except Exception as err:
-                last_err = f"{type(err).__name__}: {err}"
-                logger.warning(f"[Database] Method {idx} error: {err}")
+                err_msg = f"method_{idx} ({type(err).__name__}: {err})"
+                attempt_errors.append(err_msg)
+                logger.warning(f"[Database] {err_msg}")
 
         # If all Atlas connection methods failed:
+        last_err = "; ".join(attempt_errors) if attempt_errors else "Unknown connection failure"
         logger.error(
             f"[Database] All MongoDB Atlas connection attempts failed ({last_err}).\n"
             "Please check MONGODB_URI in Render and verify Network Access allows 0.0.0.0/0 in MongoDB Atlas.\n"
