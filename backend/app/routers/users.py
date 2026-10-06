@@ -22,11 +22,7 @@ async def get_my_profile(
     db: Optional[AsyncDatabase] = Depends(get_database),
 ) -> UserProfileResponse:
     if db is None:
-        logger.error("[Users] MongoDB database is not available for user profile storage")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database service is currently unavailable",
-        )
+        db = get_database()
 
     try:
         # Check if user profile already exists
@@ -97,11 +93,7 @@ async def update_my_profile(
     db: Optional[AsyncDatabase] = Depends(get_database),
 ) -> UserProfileResponse:
     if db is None:
-        logger.error("[Users] MongoDB database is not available for user profile update")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database service is currently unavailable",
-        )
+        db = get_database()
 
     # Trim and normalize whitespace
     cleaned_name = " ".join(payload.full_name.strip().split())

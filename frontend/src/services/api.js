@@ -85,6 +85,16 @@ export async function request(endpoint, options = {}) {
       }
     }
 
+    // If 502 Bad Gateway or 503 Service Unavailable (e.g. Render instance cold start or restart), retry once
+    if ((response.status === 502 || response.status === 503) && !_isRetry) {
+      console.warn(`[API Service] Received ${response.status} on ${endpoint}. Waiting 2s and retrying...`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      return await request(endpoint, {
+        ...options,
+        _isRetry: true,
+      });
+    }
+
     // Parse JSON or text response
     let data;
     const contentType = response.headers.get('content-type');

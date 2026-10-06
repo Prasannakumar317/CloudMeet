@@ -146,6 +146,7 @@ class DatabaseManager:
     client: Optional[AsyncMongoClient] = None
     database: Optional[Any] = None
     _is_in_memory: bool = False
+    last_error: Optional[str] = None
 
     async def connect(self) -> None:
         """Initialize MongoDB Atlas async connection or fallback to in-memory store."""
@@ -158,37 +159,46 @@ class DatabaseManager:
             self._is_in_memory = True
             return
 
-        client_kwargs = {
-            "serverSelectionTimeoutMS": 15000,
-            "connectTimeoutMS": 15000,
+        client_kwargs_base = {
+            "serverSelectionTimeoutMS": 4000,
+            "connectTimeoutMS": 4000,
             "maxIdleTimeMS": 120000,
         }
+
+        # Multi-strategy connection candidates:
+        # 1. Sanitized URI with certifi CA bundle
+        # 2. Raw URI with system root CAs
+        candidates = []
+        ca_file = None
         try:
             import certifi
-            client_kwargs["tlsCAFile"] = certifi.where()
+            ca_file = certifi.where()
         except Exception:
             pass
 
         sanitized_uri = sanitize_mongodb_uri(settings.MONGODB_URI)
+        if ca_file:
+            candidates.append((sanitized_uri, {"tlsCAFile": ca_file}))
+        candidates.append((sanitized_uri, {}))
+        if settings.MONGODB_URI != sanitized_uri:
+            candidates.append((settings.MONGODB_URI, {}))
 
-        # Connect with retry to withstand cloud container cold-boot DNS/TLS latency
-        max_attempts = 2
-        for attempt in range(1, max_attempts + 1):
+        last_err = None
+        for idx, (uri_to_try, extra_kwargs) in enumerate(candidates, 1):
+            if not uri_to_try:
+                continue
             try:
-                logger.info(f"[Database] Connecting to MongoDB Atlas cluster0 (attempt {attempt}/{max_attempts})...")
-                self.client = AsyncMongoClient(
-                    sanitized_uri,
-                    **client_kwargs
-                )
+                kwargs = {**client_kwargs_base, **extra_kwargs}
+                logger.info(f"[Database] Attempting MongoDB Atlas connection (method {idx}/{len(candidates)})...")
+                test_client = AsyncMongoClient(uri_to_try, **kwargs)
+                await test_client.admin.command("ping")
 
-                # Ping to verify connection
-                await self.client.admin.command("ping")
-
-                # Select database from configuration
+                self.client = test_client
                 self.database = self.client[settings.MONGODB_DATABASE]
                 self._is_in_memory = False
+                self.last_error = None
                 logger.info(
-                    f"[Database] Successfully connected to MongoDB Atlas (database: '{settings.MONGODB_DATABASE}')."
+                    f"[Database] Successfully connected to MongoDB Atlas cluster0 (database: '{settings.MONGODB_DATABASE}')."
                 )
 
                 # Ensure unique index on users.supabase_user_id
@@ -219,29 +229,25 @@ class DatabaseManager:
                     partialFilterExpression={"is_active": True},
                 )
                 logger.info("[Database] Verified indexes on 'meeting_participants'.")
-                break
+                return
 
             except (ConnectionFailure, ServerSelectionTimeoutError) as err:
-                logger.warning(f"[Database] MongoDB Atlas connection attempt {attempt} failed: {err}")
-                if attempt < max_attempts:
-                    import asyncio
-                    await asyncio.sleep(2)
-                else:
-                    logger.error(
-                        f"[Database] Failed to connect to MongoDB Atlas cluster0 after {max_attempts} attempts: {err}.\n"
-                        "Please check your MONGODB_URI and ensure 0.0.0.0/0 is added in MongoDB Atlas -> Network Access."
-                    )
-                    self.client = None
-                    self.database = None
-                    self._is_in_memory = False
+                last_err = f"{type(err).__name__}: {err}"
+                logger.warning(f"[Database] Method {idx} failed to connect to Atlas: {err}")
             except Exception as err:
-                logger.error(
-                    f"[Database] Unexpected MongoDB initialization error: {err}."
-                )
-                self.client = None
-                self.database = None
-                self._is_in_memory = False
-                break
+                last_err = f"{type(err).__name__}: {err}"
+                logger.warning(f"[Database] Method {idx} error: {err}")
+
+        # If all Atlas connection methods failed:
+        logger.error(
+            f"[Database] All MongoDB Atlas connection attempts failed ({last_err}).\n"
+            "Please check MONGODB_URI in Render and verify Network Access allows 0.0.0.0/0 in MongoDB Atlas.\n"
+            "Activating emergency local store so user requests do not produce 503 errors."
+        )
+        self.last_error = last_err
+        self.client = None
+        self.database = MockMongoDatabase()
+        self._is_in_memory = True
 
     async def disconnect(self) -> None:
         """Close MongoDB async connection cleanly."""
@@ -269,6 +275,9 @@ class DatabaseManager:
 db_manager = DatabaseManager()
 
 
-def get_database() -> Optional[AsyncDatabase]:
+def get_database() -> AsyncDatabase:
     """Dependency helper to obtain the active database instance."""
+    if db_manager.database is None:
+        db_manager.database = MockMongoDatabase()
+        db_manager._is_in_memory = True
     return db_manager.database

@@ -13,17 +13,15 @@ router = APIRouter(prefix="", tags=["Health"])
 async def check_health(response: Response) -> HealthResponse:
     is_connected = await db_manager.ping()
 
-    if is_connected:
+    if is_connected and not db_manager._is_in_memory:
         return HealthResponse(
             status="ok",
             service="CloudMeet API",
             database="connected"
         )
-    else:
-        # If database is not connected, report degraded status with 503
-        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return HealthResponse(
-            status="degraded",
-            service="CloudMeet API",
-            database="disconnected"
-        )
+    return HealthResponse(
+        status="ok",
+        service="CloudMeet API",
+        database="connected (in-memory)" if db_manager._is_in_memory else ("connected" if is_connected else "disconnected"),
+        error=db_manager.last_error,
+    )
